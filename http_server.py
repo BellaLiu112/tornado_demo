@@ -21,21 +21,23 @@ class User(object) :
        self.last_visit_time = 0
        self.req_num = 0
 
-
+index = 0
 pending_queue = Queue(maxsize=20)
 request_queue = Queue(maxsize=5000)
+
 
 async def process_pending():
     while True:
         req_handler = await pending_queue.get()
+        print("get request from pending queue")
         try:
-            if req_handler.isActive():
-                remote_ip = req_handler.request.remote_ip
-                message = "Hello, world {}".format(remote_ip)
-                #process grpc here
-                if req_handler.active():
-                    req_handler.write(message)
-                req_handler.finish()
+           global index
+           remote_ip = req_handler.request.remote_ip
+           message = "Hello, world {} {}".format(remote_ip, index)
+           index = index + 1
+           #process grpc here
+           req_handler.write(message)
+           req_handler.finish()
         except Exception as e:
             print('Exception: %s' % e)
         finally:
@@ -45,9 +47,10 @@ async def process_pending():
 async def process_request():
     while True:
         req_handler = await request_queue.get()
+        print("get request from request queue")
         try:
-          if req_handler.isActive():
-            await pending_queue.put(req_handler)
+           print("put request into pending queue")
+           await pending_queue.put(req_handler)
         except Exception as e:
             print('Exception: %s' % e)
         finally:
@@ -56,13 +59,13 @@ async def process_request():
 
 class MainHandler(tornado.web.RequestHandler):
     async def get(self):
-        user = request_users[self.request.remote_ip]
+        user = request_users.get(self.request.remote_ip)
         if user == None:
             user = User()
-            request_users[self.request.remote_ip] = user
+            request_users.setdefault(self.request.remote_ip, user)
         diff = current_time_mills() - user.last_visit_time
-        if (diff < 1000) :
-            if (user.req_num > 10):
+        if diff < 1000:
+            if user.req_num > 10:
                 self.write("Visit too frequently")
                 self.finish()
                 return
@@ -83,12 +86,14 @@ class MainHandler(tornado.web.RequestHandler):
         self.write("Hello, world")
 
 def clean_timeout_users():
+    print("clean timeout users")
     current_time = current_time_mills()
     for key in request_users:
         if current_time - request_users[key].last_visit_time > 10 * 60 * 1000:
+            print("del %s", key)
             del request_users[key]
 
-    IOLoop.add_timeout(time.time() + 1 * 60 * 1000, clean_timeout_users)
+    IOLoop.add_timeout(IOLoop.current(), deadline=time.time() + 1 * 60 * 1000, callback=clean_timeout_users)
 
 def make_app():
     return tornado.web.Application([
@@ -97,8 +102,8 @@ def make_app():
 
 if __name__ == "__main__":
     app = make_app()
-    app.listen(8888)
-    IOLoop.add_timeout(time.time() + 1 * 60 * 1000, clean_timeout_users)
+    app.listen(8889)
+    IOLoop.add_timeout(IOLoop.current(),deadline=time.time() + 1 * 60 * 1000, callback=clean_timeout_users)
     IOLoop.current().spawn_callback(process_request)
     IOLoop.current().spawn_callback(process_pending)
     IOLoop.current().start()
