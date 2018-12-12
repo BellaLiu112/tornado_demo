@@ -1,9 +1,10 @@
 import tornado.httpserver
 import tornado.ioloop
 import tornado.options
-import tornado.gen
 import tornado.web
 import tornado.queues
+from tornado import gen
+from tornado.locks import Semaphore
 from tornado.ioloop import IOLoop
 from tornado.queues import Queue
 import time
@@ -22,18 +23,22 @@ class User(object) :
        self.req_num = 0
 
 index = 0
-pending_queue = Queue(maxsize=20)
+worker_stop = 0
+concurrent_worker_count = 20
+consumer = Semaphore(concurrent_worker_count)
 request_queue = Queue(maxsize=5000)
 
 
-async def process_pending():
-    while True:
-        req_handler = await pending_queue.get()
-        print("get request from pending queue")
+async def worker(worker_id):
+    print("worker {} start".format(worker_id))
+    while not worker_stop:
+        await consumer.acquire()
+        req_handler = await request_queue.get()
+        print("worker {} work".format(worker_id))
         try:
            global index
            remote_ip = req_handler.request.remote_ip
-           message = "Hello, world {} {}".format(remote_ip, index)
+           message = "love you liuchen {} {}".format(remote_ip, index)
            index = index + 1
            #process grpc here
            req_handler.write(message)
@@ -41,20 +46,7 @@ async def process_pending():
         except Exception as e:
             print('Exception: %s' % e)
         finally:
-            pending_queue.task_done()
-
-
-async def process_request():
-    while True:
-        req_handler = await request_queue.get()
-        print("get request from request queue")
-        try:
-           print("put request into pending queue")
-           await pending_queue.put(req_handler)
-        except Exception as e:
-            print('Exception: %s' % e)
-        finally:
-            request_queue.task_done()
+            consumer.release()
 
 
 class MainHandler(tornado.web.RequestHandler):
@@ -95,6 +87,10 @@ def clean_timeout_users():
 
     IOLoop.add_timeout(IOLoop.current(), deadline=time.time() + 1 * 60 * 1000, callback=clean_timeout_users)
 
+async def worker_runner():
+    # Join all workers.
+    await gen.multi([worker(i) for i in range(concurrent_worker_count)])
+
 def make_app():
     return tornado.web.Application([
         (r"/", MainHandler),
@@ -104,6 +100,5 @@ if __name__ == "__main__":
     app = make_app()
     app.listen(8889)
     IOLoop.add_timeout(IOLoop.current(),deadline=time.time() + 1 * 60 * 1000, callback=clean_timeout_users)
-    IOLoop.current().spawn_callback(process_request)
-    IOLoop.current().spawn_callback(process_pending)
+    IOLoop.run_sync(IOLoop.current(), worker_runner)
     IOLoop.current().start()
